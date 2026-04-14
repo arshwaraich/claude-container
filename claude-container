@@ -8,6 +8,7 @@ BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-claude-code-base:latest}"
 FALLBACK_IMAGE="debian:stable-slim"
 WORKDIR="/workspace"
 CLAUDE_HOME_IN_CONTAINER="/root/.claude"
+CLAUDE_CONFIG_IN_CONTAINER="/root/.claude.json"  # onboarding/theme/trust state
 CLAUDE_HOME_DIRNAME=".claude-home"  # where per-session state is stashed next to the project
 SHARED_CLAUDE_HOME="${CLAUDE_CONTAINER_HOME:-$HOME/.claude-container-home}"  # persistent auth/state across sessions
 KEYCHAIN_SERVICE="Claude Code-credentials"
@@ -130,6 +131,17 @@ cleanup() {
   fi
   rm -f "$state_tmp"
 
+  # Also persist ~/.claude.json (onboarding, theme, trust-folder state)
+  container exec "$CONTAINER_NAME" \
+    sh -c "[ -f $CLAUDE_CONFIG_IN_CONTAINER ] && cat $CLAUDE_CONFIG_IN_CONTAINER || true" \
+    > "$SHARED_CLAUDE_HOME/.claude.json.tmp" 2>/dev/null || true
+  if [[ -s "$SHARED_CLAUDE_HOME/.claude.json.tmp" ]]; then
+    mv "$SHARED_CLAUDE_HOME/.claude.json.tmp" "$SHARED_CLAUDE_HOME/.claude.json"
+    cp "$SHARED_CLAUDE_HOME/.claude.json" "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME/.claude.json" 2>/dev/null || true
+  else
+    rm -f "$SHARED_CLAUDE_HOME/.claude.json.tmp"
+  fi
+
   log "Stopping container '$CONTAINER_NAME'..."
   container stop "$CONTAINER_NAME" 2>/dev/null || true
 
@@ -173,9 +185,13 @@ fi
 if [[ -n "$RESTORE_SRC" ]]; then
   log "Restoring Claude state from $RESTORE_SRC (auth + resume)..."
   container exec "$CONTAINER_NAME" mkdir -p "$CLAUDE_HOME_IN_CONTAINER"
-  tar -czf - -C "$RESTORE_SRC" . \
+  tar -czf - -C "$RESTORE_SRC" --exclude=./.claude.json . \
     | container exec -i "$CONTAINER_NAME" \
         tar -xzf - -C "$CLAUDE_HOME_IN_CONTAINER"
+  if [[ -f "$RESTORE_SRC/.claude.json" ]]; then
+    container exec -i "$CONTAINER_NAME" \
+      sh -c "cat > $CLAUDE_CONFIG_IN_CONTAINER" < "$RESTORE_SRC/.claude.json"
+  fi
 fi
 
 # ── Install Claude Code if using fallback image ───────────────────────────────
