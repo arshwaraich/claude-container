@@ -23,10 +23,11 @@ err()  { printf "${RED}[claude-container]${NC} %s\n" "$*" >&2; }
 build_base_image() {
   log "Building base image '$BASE_IMAGE' with Claude Code pre-installed..."
 
-  # Ensure the container builder is running
-  if ! container builder info &>/dev/null; then
-    log "Starting container builder..."
-    container builder start
+  # Ensure the container builder is running with enough memory for the
+  # native Claude installer (OOM-killed at the default 2GB).
+  if ! container builder status 2>/dev/null | grep -q running; then
+    log "Starting container builder (8G memory)..."
+    container builder start -m 8G
   fi
 
   local tmpdir
@@ -44,7 +45,8 @@ WORKDIR /workspace
 CMD ["bash"]
 EOF
 
-  container build -t "$BASE_IMAGE" "$tmpdir"
+  # Native installer needs >2GB RAM; default builder gets OOM-killed otherwise.
+  container build -m 4G -t "$BASE_IMAGE" "$tmpdir"
   log "Base image ready: $BASE_IMAGE"
 }
 
