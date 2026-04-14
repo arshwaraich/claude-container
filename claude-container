@@ -5,7 +5,7 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-claude-code-base:latest}"
-FALLBACK_IMAGE="node:20"
+FALLBACK_IMAGE="debian:stable-slim"
 WORKDIR="/workspace"
 CLAUDE_HOME_IN_CONTAINER="/root/.claude"
 CLAUDE_HOME_DIRNAME=".claude-home"  # where per-session state is stashed next to the project
@@ -33,8 +33,12 @@ build_base_image() {
   trap 'rm -rf "$tmpdir"' RETURN
 
   cat > "$tmpdir/Dockerfile" <<'EOF'
-FROM node:20-slim
-RUN npm install -g @anthropic-ai/claude-code
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && ln -s /root/.local/bin/claude /usr/local/bin/claude
 WORKDIR /workspace
 CMD ["bash"]
 EOF
@@ -176,8 +180,13 @@ fi
 
 # ── Install Claude Code if using fallback image ───────────────────────────────
 if [[ "$NEEDS_INSTALL" == "true" ]]; then
-  log "Installing Claude Code (one-time, ~30s)..."
-  container exec "$CONTAINER_NAME" npm install -g @anthropic-ai/claude-code
+  log "Installing Claude Code via native installer (one-time)..."
+  container exec "$CONTAINER_NAME" sh -c "
+    apt-get update \
+      && apt-get install -y --no-install-recommends curl ca-certificates git \
+      && curl -fsSL https://claude.ai/install.sh | bash \
+      && ln -s /root/.local/bin/claude /usr/local/bin/claude
+  "
 fi
 
 # ── Launch Claude Code ────────────────────────────────────────────────────────
@@ -186,5 +195,6 @@ container exec \
   -it \
   -w "$WORKDIR" \
   -e ANTHROPIC_API_KEY \
+  -e IS_SANDBOX=1 \
   "$CONTAINER_NAME" \
   claude "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
