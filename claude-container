@@ -7,6 +7,8 @@ set -euo pipefail
 BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-claude-code-base:latest}"
 FALLBACK_IMAGE="node:20"
 WORKDIR="/workspace"
+CLAUDE_HOME_IN_CONTAINER="/root/.claude"
+CLAUDE_HOME_DIRNAME=".claude-home"  # where state is stashed next to the project
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -86,9 +88,19 @@ cleanup() {
   if container exec "$CONTAINER_NAME" \
        tar -czf - -C "$WORKDIR" . 2>/dev/null \
      | tar -xzf - -C "$HOST_OUTPUT_DIR" 2>/dev/null; then
-    log "Files saved to: $HOST_OUTPUT_DIR"
+    log "Workspace saved to: $HOST_OUTPUT_DIR"
   else
-    warn "Could not copy files back (container may have already stopped)."
+    warn "Could not copy workspace back (container may have already stopped)."
+  fi
+
+  # Save Claude's state (conversation history, auth, etc.) alongside the workspace
+  mkdir -p "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME"
+  if container exec "$CONTAINER_NAME" \
+       sh -c "[ -d $CLAUDE_HOME_IN_CONTAINER ] && tar -czf - -C $CLAUDE_HOME_IN_CONTAINER . || true" 2>/dev/null \
+     | tar -xzf - -C "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME" 2>/dev/null; then
+    log "Claude state saved to: $HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME"
+  else
+    warn "Could not copy Claude state back."
   fi
 
   log "Stopping container '$CONTAINER_NAME'..."
@@ -118,9 +130,19 @@ tar -czf - \
   --exclude='node_modules' \
   --exclude='.venv' \
   --exclude='__pycache__' \
+  --exclude="./$CLAUDE_HOME_DIRNAME" \
   . \
 | container exec -i "$CONTAINER_NAME" \
     tar -xzf - -C "$WORKDIR"
+
+# Restore prior Claude state if this folder was produced by a previous session
+if [[ -d "./$CLAUDE_HOME_DIRNAME" ]]; then
+  log "Restoring prior Claude state from ./$CLAUDE_HOME_DIRNAME (resume supported)..."
+  container exec "$CONTAINER_NAME" mkdir -p "$CLAUDE_HOME_IN_CONTAINER"
+  tar -czf - -C "./$CLAUDE_HOME_DIRNAME" . \
+    | container exec -i "$CONTAINER_NAME" \
+        tar -xzf - -C "$CLAUDE_HOME_IN_CONTAINER"
+fi
 
 # ── Install Claude Code if using fallback image ───────────────────────────────
 if [[ "$NEEDS_INSTALL" == "true" ]]; then

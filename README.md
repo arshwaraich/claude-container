@@ -62,10 +62,13 @@ claude-container -- --model claude-opus-4-6
 ## What happens
 
 1. **Start** — a detached container named `claude-<folder>-<timestamp>` is launched (`sleep infinity` as PID 1, `--rm` on exit)
-2. **Copy in** — current directory is tarred into `/workspace`, excluding `.git`, `node_modules`, `.venv`, `__pycache__`
-3. **Run** — `container exec -it` drops you into Claude Code in `/workspace`
-4. **Copy out** — when you quit Claude, `/workspace` is tarred back out to `./claude-session-<timestamp>/` in your original folder
-5. **Cleanup** — container is stopped and removed
+2. **Copy in** — current directory is tarred into `/workspace`, excluding `.git`, `node_modules`, `.venv`, `__pycache__`, `.claude-home`
+3. **Restore state** — if a `.claude-home/` directory exists in cwd, it's restored to `/root/.claude` inside the container (enables resuming prior sessions)
+4. **Run** — `container exec -it` drops you into Claude Code in `/workspace`
+5. **Copy out** — when you quit Claude:
+   - `/workspace` is tarred back out to `./claude-session-<timestamp>/`
+   - `/root/.claude` (conversation history, auth, session transcripts) is tarred back out to `./claude-session-<timestamp>/.claude-home/`
+6. **Cleanup** — container is stopped and removed
 
 The original folder is never modified. To accept changes, diff against `./claude-session-<timestamp>/` and copy over what you want:
 
@@ -73,6 +76,21 @@ The original folder is never modified. To accept changes, diff against `./claude
 diff -r . claude-session-20260414-163000/
 cp -r claude-session-20260414-163000/src/. src/
 ```
+
+## Resuming a session
+
+Every session directory contains a `.claude-home/` folder with Claude's conversation history. To pick up where you left off:
+
+```bash
+cd claude-session-20260414-163000
+claude-container -- --continue      # resume most recent conversation
+# or
+claude-container -- --resume        # pick from a list of past conversations
+```
+
+On launch, the script detects `.claude-home/` and restores it to `/root/.claude` inside the new container — so `claude --continue` / `claude --resume` sees your prior transcripts. When you quit, a *new* `claude-session-<timestamp>/` is written alongside (state carries forward, old session is left intact).
+
+If you want to keep evolving state in place instead of accumulating session folders, just `mv claude-session-XXX/* .` to fold the latest session back into your project root — the `.claude-home/` goes with it.
 
 ## Configuration
 
@@ -93,7 +111,7 @@ cp -r claude-session-20260414-163000/src/. src/
 
 ## Caveats
 
-- **Excluded paths** — `.git`, `node_modules`, `.venv`, `__pycache__` are not copied in (to keep startup fast). Git history in particular is absent; Claude can't run `git log` on your real history.
+- **Excluded paths** — `.git`, `node_modules`, `.venv`, `__pycache__`, `.claude-home` are not copied into `/workspace`. Git history in particular is absent; Claude can't run `git log` on your real history. (`.claude-home` is routed to `/root/.claude` instead.)
 - **No host network mounts** — this is by design. If you need a DB socket or similar, extend the script with `-v` / `--mount` flags on `container run`.
 - **Secrets** — only `ANTHROPIC_API_KEY` is forwarded. Add more `-e VAR` lines if your project needs them.
 - **Arch** — defaults to `arm64` (Apple Silicon). Override with `container` flags if needed.
