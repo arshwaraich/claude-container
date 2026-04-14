@@ -21,7 +21,7 @@ Claude Code is powerful, but giving an autonomous agent direct write access to y
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<you>/claude-container/main/claude-container \
+curl -fsSL https://raw.githubusercontent.com/arshwaraich/claude-container/main/claude-container \
   -o /usr/local/bin/claude-container
 chmod +x /usr/local/bin/claude-container
 ```
@@ -29,7 +29,7 @@ chmod +x /usr/local/bin/claude-container
 Or clone and symlink:
 
 ```bash
-git clone https://github.com/<you>/claude-container.git
+git clone https://github.com/arshwaraich/claude-container.git
 ln -s "$PWD/claude-container/claude-container" /usr/local/bin/claude-container
 ```
 
