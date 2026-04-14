@@ -1,0 +1,138 @@
+#!/bin/bash
+# claude-container: Run Claude Code in an isolated Apple container
+# Usage: claude-container [--build] [-- claude-args...]
+set -euo pipefail
+
+# ── Configuration ────────────────────────────────────────────────────────────
+BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-claude-code-base:latest}"
+FALLBACK_IMAGE="node:20"
+WORKDIR="/workspace"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+log()  { printf "${GREEN}[claude-container]${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}[claude-container]${NC} %s\n" "$*"; }
+err()  { printf "${RED}[claude-container]${NC} %s\n" "$*" >&2; }
+
+# ── Build base image (--build flag) ──────────────────────────────────────────
+build_base_image() {
+  log "Building base image '$BASE_IMAGE' with Claude Code pre-installed..."
+
+  # Ensure the container builder is running
+  if ! container builder info &>/dev/null; then
+    log "Starting container builder..."
+    container builder start
+  fi
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  cat > "$tmpdir/Dockerfile" <<'EOF'
+FROM node:20-slim
+RUN npm install -g @anthropic-ai/claude-code
+WORKDIR /workspace
+CMD ["bash"]
+EOF
+
+  container build -t "$BASE_IMAGE" "$tmpdir"
+  log "Base image ready: $BASE_IMAGE"
+}
+
+if [[ "${1:-}" == "--build" ]]; then
+  build_base_image
+  exit 0
+fi
+
+# Collect any extra args to pass to claude (after --)
+CLAUDE_ARGS=()
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--" ]]; then
+    shift; CLAUDE_ARGS=("$@"); break
+  fi
+  err "Unknown argument: $1  (use -- to pass args to claude)"
+  exit 1
+done
+
+# ── Resolve image and whether we need to npm-install ────────────────────────
+NEEDS_INSTALL=false
+IMAGE="$BASE_IMAGE"
+
+if ! container image ls 2>/dev/null | awk '{print $1":"$2}' | grep -qF "$BASE_IMAGE"; then
+  warn "Base image '$BASE_IMAGE' not found."
+  warn "Tip: run 'claude-container --build' once to pre-install Claude Code (faster starts)."
+  warn "Falling back to '$FALLBACK_IMAGE' — Claude Code will be installed now..."
+  IMAGE="$FALLBACK_IMAGE"
+  NEEDS_INSTALL=true
+fi
+
+# ── Session setup ────────────────────────────────────────────────────────────
+FOLDER_NAME="$(basename "$(pwd)")"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+CONTAINER_NAME="claude-${FOLDER_NAME}-${TIMESTAMP}"
+HOST_OUTPUT_DIR="$(pwd)/claude-session-${TIMESTAMP}"
+
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  warn "ANTHROPIC_API_KEY is not set — Claude Code may prompt for it inside the container."
+fi
+
+# ── Cleanup: copy files back, then stop container ────────────────────────────
+cleanup() {
+  local exit_code=$?
+  echo  # newline after Claude's TUI
+  log "Session ended. Copying workspace back to host..."
+
+  mkdir -p "$HOST_OUTPUT_DIR"
+  if container exec "$CONTAINER_NAME" \
+       tar -czf - -C "$WORKDIR" . 2>/dev/null \
+     | tar -xzf - -C "$HOST_OUTPUT_DIR" 2>/dev/null; then
+    log "Files saved to: $HOST_OUTPUT_DIR"
+  else
+    warn "Could not copy files back (container may have already stopped)."
+  fi
+
+  log "Stopping container '$CONTAINER_NAME'..."
+  container stop "$CONTAINER_NAME" 2>/dev/null || true
+
+  exit $exit_code
+}
+
+# ── Start container ──────────────────────────────────────────────────────────
+log "Starting container '$CONTAINER_NAME' from image '$IMAGE'..."
+container run \
+  --detach \
+  --name "$CONTAINER_NAME" \
+  --rm \
+  -e ANTHROPIC_API_KEY \
+  "$IMAGE" \
+  sleep infinity
+
+trap cleanup EXIT
+
+# ── Copy project files in ────────────────────────────────────────────────────
+log "Copying '$(pwd)' into container workspace..."
+container exec "$CONTAINER_NAME" mkdir -p "$WORKDIR"
+
+tar -czf - \
+  --exclude='.git' \
+  --exclude='node_modules' \
+  --exclude='.venv' \
+  --exclude='__pycache__' \
+  . \
+| container exec -i "$CONTAINER_NAME" \
+    tar -xzf - -C "$WORKDIR"
+
+# ── Install Claude Code if using fallback image ───────────────────────────────
+if [[ "$NEEDS_INSTALL" == "true" ]]; then
+  log "Installing Claude Code (one-time, ~30s)..."
+  container exec "$CONTAINER_NAME" npm install -g @anthropic-ai/claude-code
+fi
+
+# ── Launch Claude Code ────────────────────────────────────────────────────────
+log "Launching Claude Code (container: $CONTAINER_NAME)..."
+container exec \
+  -it \
+  -w "$WORKDIR" \
+  -e ANTHROPIC_API_KEY \
+  "$CONTAINER_NAME" \
+  claude "${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}"
