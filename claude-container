@@ -8,7 +8,9 @@ BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-claude-code-base:latest}"
 FALLBACK_IMAGE="node:20"
 WORKDIR="/workspace"
 CLAUDE_HOME_IN_CONTAINER="/root/.claude"
-CLAUDE_HOME_DIRNAME=".claude-home"  # where state is stashed next to the project
+CLAUDE_HOME_DIRNAME=".claude-home"  # where per-session state is stashed next to the project
+SHARED_CLAUDE_HOME="${CLAUDE_CONTAINER_HOME:-$HOME/.claude-container-home}"  # persistent auth/state across sessions
+KEYCHAIN_SERVICE="Claude Code-credentials"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -75,7 +77,20 @@ CONTAINER_NAME="claude-${FOLDER_NAME}-${TIMESTAMP}"
 HOST_OUTPUT_DIR="$(pwd)/claude-session-${TIMESTAMP}"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  warn "ANTHROPIC_API_KEY is not set — Claude Code may prompt for it inside the container."
+  warn "ANTHROPIC_API_KEY is not set — will try to reuse stored Claude Code credentials."
+fi
+
+# ── Seed persistent auth dir from macOS Keychain (one-time) ──────────────────
+mkdir -p "$SHARED_CLAUDE_HOME"
+chmod 700 "$SHARED_CLAUDE_HOME"
+if [[ ! -f "$SHARED_CLAUDE_HOME/.credentials.json" ]] && command -v security &>/dev/null; then
+  if creds="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)" && [[ -n "$creds" ]]; then
+    printf '%s' "$creds" > "$SHARED_CLAUDE_HOME/.credentials.json"
+    chmod 600 "$SHARED_CLAUDE_HOME/.credentials.json"
+    log "Seeded Claude credentials from macOS Keychain into $SHARED_CLAUDE_HOME."
+  else
+    warn "Could not read '$KEYCHAIN_SERVICE' from Keychain — you may need to log in once inside the container."
+  fi
 fi
 
 # ── Cleanup: copy files back, then stop container ────────────────────────────
@@ -93,15 +108,23 @@ cleanup() {
     warn "Could not copy workspace back (container may have already stopped)."
   fi
 
-  # Save Claude's state (conversation history, auth, etc.) alongside the workspace
-  mkdir -p "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME"
+  # Save Claude's state (conversation history, auth, etc.) to the shared persistent dir
+  # so auth and history survive across sessions. Also keep a per-session snapshot.
+  mkdir -p "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME" "$SHARED_CLAUDE_HOME"
+  local state_tmp
+  state_tmp="$(mktemp -t claude-state.XXXXXX.tar.gz)"
   if container exec "$CONTAINER_NAME" \
-       sh -c "[ -d $CLAUDE_HOME_IN_CONTAINER ] && tar -czf - -C $CLAUDE_HOME_IN_CONTAINER . || true" 2>/dev/null \
-     | tar -xzf - -C "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME" 2>/dev/null; then
-    log "Claude state saved to: $HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME"
+       sh -c "[ -d $CLAUDE_HOME_IN_CONTAINER ] && tar -czf - -C $CLAUDE_HOME_IN_CONTAINER . || true" \
+       > "$state_tmp" 2>/dev/null \
+     && [[ -s "$state_tmp" ]]; then
+    tar -xzf "$state_tmp" -C "$SHARED_CLAUDE_HOME" 2>/dev/null \
+      && log "Claude state synced to: $SHARED_CLAUDE_HOME"
+    tar -xzf "$state_tmp" -C "$HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME" 2>/dev/null \
+      && log "Per-session snapshot: $HOST_OUTPUT_DIR/$CLAUDE_HOME_DIRNAME"
   else
     warn "Could not copy Claude state back."
   fi
+  rm -f "$state_tmp"
 
   log "Stopping container '$CONTAINER_NAME'..."
   container stop "$CONTAINER_NAME" 2>/dev/null || true
@@ -135,11 +158,18 @@ tar -czf - \
 | container exec -i "$CONTAINER_NAME" \
     tar -xzf - -C "$WORKDIR"
 
-# Restore prior Claude state if this folder was produced by a previous session
-if [[ -d "./$CLAUDE_HOME_DIRNAME" ]]; then
-  log "Restoring prior Claude state from ./$CLAUDE_HOME_DIRNAME (resume supported)..."
+# Restore prior Claude state. Prefer the persistent shared dir (has auth);
+# fall back to a per-project .claude-home if present.
+RESTORE_SRC=""
+if [[ -d "$SHARED_CLAUDE_HOME" ]] && [[ -n "$(ls -A "$SHARED_CLAUDE_HOME" 2>/dev/null)" ]]; then
+  RESTORE_SRC="$SHARED_CLAUDE_HOME"
+elif [[ -d "./$CLAUDE_HOME_DIRNAME" ]]; then
+  RESTORE_SRC="./$CLAUDE_HOME_DIRNAME"
+fi
+if [[ -n "$RESTORE_SRC" ]]; then
+  log "Restoring Claude state from $RESTORE_SRC (auth + resume)..."
   container exec "$CONTAINER_NAME" mkdir -p "$CLAUDE_HOME_IN_CONTAINER"
-  tar -czf - -C "./$CLAUDE_HOME_DIRNAME" . \
+  tar -czf - -C "$RESTORE_SRC" . \
     | container exec -i "$CONTAINER_NAME" \
         tar -xzf - -C "$CLAUDE_HOME_IN_CONTAINER"
 fi
