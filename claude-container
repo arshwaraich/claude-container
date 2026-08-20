@@ -191,8 +191,13 @@ if [[ -n "$RESTORE_SRC" ]]; then
     | container exec -i "$CONTAINER_NAME" \
         tar -xzf - -C "$CLAUDE_HOME_IN_CONTAINER"
   if [[ -f "$RESTORE_SRC/.claude.json" ]]; then
-    container exec -i "$CONTAINER_NAME" \
-      sh -c "cat > $CLAUDE_CONFIG_IN_CONTAINER" < "$RESTORE_SRC/.claude.json"
+    # hasCompletedOnboarding doesn't always make it into the synced-back
+    # config (e.g. a session quit before finishing onboarding). Without it,
+    # Claude Code reruns the full first-time welcome wizard on every launch
+    # even though the OAuth credentials underneath are perfectly valid.
+    jq '.hasCompletedOnboarding = true' "$RESTORE_SRC/.claude.json" \
+      | container exec -i "$CONTAINER_NAME" \
+          sh -c "cat > $CLAUDE_CONFIG_IN_CONTAINER"
   fi
 fi
 
